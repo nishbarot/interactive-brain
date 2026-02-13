@@ -23,7 +23,7 @@ export class GestureControls {
     // --- Rotation (twist_pose + vertical tilt) ---
     // No velocity cap — rotation is proportional to hand twist, full 360+.
     this._rotationVelocityY = 0;
-    this._twistSensitivity = 4.5;
+    this._twistSensitivity = 2.8;
     this._twistDeadZone = 0.0012;
     this._twistAccel = 0.45;
     this._twistDecel = 0.15;
