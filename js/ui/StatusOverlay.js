@@ -11,10 +11,11 @@ export class StatusOverlay {
 
   static GESTURE_LABELS = {
     none: 'Ready',
-    open_palm: 'Twist to rotate',
+    open_palm: 'Palm ready',
+    twist_pose: 'Twist rotating',
     pinch: 'Selecting',
     fist: 'Resetting',
-    point: 'Highlighting',
+    point: 'Pointing',
     spread: 'Expanding',
     squeeze: 'Collapsing',
     swipe_left: 'Previous',

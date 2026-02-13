@@ -44,6 +44,33 @@ function dist2D(a, b) {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
 }
 
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function wrapAngleDelta(delta) {
+  let d = delta;
+  if (d > Math.PI) d -= 2 * Math.PI;
+  if (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+function median(values) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+function stdDev(values) {
+  if (values.length <= 1) return 0;
+  const avg = values.reduce((acc, v) => acc + v, 0) / values.length;
+  const variance = values.reduce((acc, v) => acc + (v - avg) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
 /**
  * Get the palm size (wrist to middle MCP distance) to normalize all measurements.
  * This makes detection work regardless of hand distance from camera.
@@ -105,6 +132,17 @@ export class GestureRecognizer {
 
     // Hand roll angle tracking (for lightbulb-twist rotation)
     this._prevHandAngle = null;
+    this._angleDeltaHistory = [];
+    this._filteredHandAngleDelta = 0;
+    this._prevPinchAxisAngle = null;
+    this._filteredPinchAxisDelta = 0;
+
+    // Robust twist-pose gating with hysteresis
+    this._twistPoseActive = false;
+    this._twistPoseEnterThreshold = 0.58;
+    this._twistPoseExitThreshold = 0.42;
+
+    this._lastStableGesture = 'none';
   }
 
   /**
@@ -118,7 +156,10 @@ export class GestureRecognizer {
       handPosition: null,
       palmDelta: null,       // { dx, dy } frame-to-frame movement
       handAngle: 0,          // hand roll angle in radians (index→pinky line)
-      handAngleDelta: 0,     // frame-to-frame twist amount (lightbulb rotation)
+      handAngleDelta: 0,     // filtered frame-to-frame twist amount
+      rawHandAngleDelta: 0,  // raw frame-to-frame twist amount
+      twistPoseScore: 0,
+      twistPoseActive: false,
       handsDetected: 0,
       twoHandDistance: null,
       twoHandDelta: 0,
@@ -130,6 +171,11 @@ export class GestureRecognizer {
       this._smoothTwoHandDist = null;
       this._gestureBuffer = [];
       this._prevHandAngle = null;
+      this._angleDeltaHistory = [];
+      this._filteredHandAngleDelta = 0;
+      this._prevPinchAxisAngle = null;
+      this._filteredPinchAxisDelta = 0;
+      this._twistPoseActive = false;
       return output;
     }
 
@@ -158,24 +204,6 @@ export class GestureRecognizer {
     // Keep only last 20 entries
     if (this._palmHistory.length > 20) this._palmHistory.shift();
 
-    // ========= Hand roll angle (lightbulb twist) =========
-    // The angle of the line from INDEX_MCP → PINKY_MCP measures wrist roll.
-    // Twisting your hand like screwing a lightbulb changes this angle.
-    const handAngle = Math.atan2(
-      lm[PINKY_MCP].y - lm[INDEX_MCP].y,
-      lm[PINKY_MCP].x - lm[INDEX_MCP].x
-    );
-    output.handAngle = handAngle;
-
-    if (this._prevHandAngle !== null) {
-      let angleDelta = handAngle - this._prevHandAngle;
-      // Handle ±PI wraparound (e.g. going from 3.1 to -3.1 is a tiny change, not 6.2)
-      if (angleDelta > Math.PI) angleDelta -= 2 * Math.PI;
-      if (angleDelta < -Math.PI) angleDelta += 2 * Math.PI;
-      output.handAngleDelta = angleDelta;
-    }
-    this._prevHandAngle = handAngle;
-
     // Finger curl states (0 = extended, 1 = curled)
     const indexCurl = getFingerCurl(lm, INDEX_PIP, INDEX_TIP);
     const middleCurl = getFingerCurl(lm, MIDDLE_PIP, MIDDLE_TIP);
@@ -191,8 +219,93 @@ export class GestureRecognizer {
     const pinkyExtended = pinkyCurl < 0.4;
     const extendedCount = [thumbExt, indexExtended, middleExtended, ringExtended, pinkyExtended].filter(Boolean).length;
 
-    // Pinch distance normalized by palm size
+    // Normalized thumb-index distance (also used by pinch and twist scoring)
     const pinchDist = dist(lm[THUMB_TIP], lm[INDEX_TIP]) / palmSize;
+
+    // ========= Twist pose scoring + hysteresis =========
+    // Twist pose definition:
+    // - Thumb + index extended
+    // - Middle/ring/pinky mostly curled
+    const curledOthersScore = (middleCurl + ringCurl + pinkyCurl) / 3;
+    const thumbReady = thumbExt || pinchDist < 0.72;
+    const indexReady = indexExtended || indexCurl < 0.55;
+    const twistPoseScore = clamp(
+      (thumbReady ? 0.34 : 0) +
+      (indexReady ? 0.34 : 0) +
+      (curledOthersScore * 0.18) +
+      (pinchDist < 0.55 ? 0.18 : 0),
+      0,
+      1
+    );
+    output.twistPoseScore = twistPoseScore;
+
+    if (!this._twistPoseActive && twistPoseScore >= this._twistPoseEnterThreshold) {
+      this._twistPoseActive = true;
+    } else if (this._twistPoseActive && twistPoseScore < this._twistPoseExitThreshold) {
+      this._twistPoseActive = false;
+    }
+    output.twistPoseActive = this._twistPoseActive;
+
+    // ========= Hand roll angle (lightbulb twist) =========
+    // Primary axis: INDEX_MCP → PINKY_MCP (palm axis)
+    const handAngle = Math.atan2(
+      lm[PINKY_MCP].y - lm[INDEX_MCP].y,
+      lm[PINKY_MCP].x - lm[INDEX_MCP].x
+    );
+    output.handAngle = handAngle;
+
+    const hadPrevHandAngle = this._prevHandAngle !== null;
+    let palmAxisDelta = 0;
+    if (hadPrevHandAngle) {
+      palmAxisDelta = wrapAngleDelta(handAngle - this._prevHandAngle);
+    }
+    this._prevHandAngle = handAngle;
+
+    // Secondary axis: THUMB_TIP → INDEX_TIP.
+    // This captures "twist while pinching" better than palm axis in some viewpoints.
+    const pinchAxisAngle = Math.atan2(
+      lm[INDEX_TIP].y - lm[THUMB_TIP].y,
+      lm[INDEX_TIP].x - lm[THUMB_TIP].x
+    );
+    let pinchAxisDelta = 0;
+    if (this._prevPinchAxisAngle !== null) {
+      pinchAxisDelta = wrapAngleDelta(pinchAxisAngle - this._prevPinchAxisAngle);
+    }
+    this._prevPinchAxisAngle = pinchAxisAngle;
+
+    if (hadPrevHandAngle) {
+      // Smooth secondary axis separately.
+      this._filteredPinchAxisDelta += (pinchAxisDelta - this._filteredPinchAxisDelta) * 0.35;
+
+      // Blend: when thumb/index are close, trust pinch-axis more.
+      const pinchBlend = clamp((0.75 - pinchDist) / 0.35, 0, 1);
+      let rawDelta = (palmAxisDelta * (1 - pinchBlend)) + (this._filteredPinchAxisDelta * pinchBlend);
+      output.rawHandAngleDelta = rawDelta;
+
+      // Add to history for robust statistics.
+      this._angleDeltaHistory.push(rawDelta);
+      if (this._angleDeltaHistory.length > 7) this._angleDeltaHistory.shift();
+
+      const med = median(this._angleDeltaHistory);
+      const sigma = stdDev(this._angleDeltaHistory);
+
+      // Reject outliers relative to local distribution.
+      const outlierLimit = Math.max(0.08, sigma * 3.0);
+      if (Math.abs(rawDelta - med) > outlierLimit) {
+        rawDelta = med;
+      }
+
+      // Adaptive deadzone: rises slightly when local jitter rises.
+      const adaptiveDeadzone = 0.002 + Math.min(0.02, sigma * 1.6);
+      const cleanedDelta = Math.abs(rawDelta) > adaptiveDeadzone ? rawDelta : 0;
+
+      // Final low-pass filter for smooth control signal.
+      this._filteredHandAngleDelta += (cleanedDelta - this._filteredHandAngleDelta) * 0.34;
+      output.handAngleDelta = this._filteredHandAngleDelta;
+    } else {
+      output.rawHandAngleDelta = 0;
+      output.handAngleDelta = 0;
+    }
 
     // ========= Two-hand gestures (highest priority) =========
     if (results.landmarks.length >= 2) {
@@ -236,13 +349,19 @@ export class GestureRecognizer {
       rawGesture = 'fist';
       output.confidence = 1 - extendedCount / 5;
     }
+    // Twist pose: robust gated posture for rotation
+    else if (this._twistPoseActive) {
+      rawGesture = 'twist_pose';
+      output.confidence = twistPoseScore;
+    }
     // Point: only index extended
     else if (indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
       rawGesture = 'point';
       output.confidence = 0.9;
     }
-    // Open palm: 4+ fingers extended
-    else if (extendedCount >= 4) {
+    // Open palm: 3+ fingers extended (relaxed to tolerate fingers
+    // appearing curled during a lightbulb-twist rotation)
+    else if (extendedCount >= 3) {
       rawGesture = 'open_palm';
       output.confidence = extendedCount / 5;
     }
@@ -295,6 +414,13 @@ export class GestureRecognizer {
     // Swipe gestures bypass stability (they're already debounced internally)
     if (rawGesture === 'swipe_left' || rawGesture === 'swipe_right') {
       output.gesture = rawGesture;
+    }
+
+    // Twist pose has its own hysteresis. Preserve it unless a higher-priority
+    // action is active, avoiding flicker between twist_pose and none/point.
+    const highPriority = ['pinch', 'fist', 'spread', 'squeeze', 'swipe_left', 'swipe_right'];
+    if (this._twistPoseActive && !highPriority.includes(rawGesture)) {
+      output.gesture = 'twist_pose';
     }
 
     this._lastStableGesture = output.gesture;

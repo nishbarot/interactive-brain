@@ -2,10 +2,9 @@
  * Maps recognized gestures to BrainModel actions.
  *
  * Intuitive gesture mapping:
- *  - Open palm + twist → Rotate brain (lightbulb twist = Y rotation, hand up/down = X tilt)
+ *  - Twist pose        → Rotate brain (lightbulb twist = Y rotation, hand up/down = X tilt)
  *  - Pinch             → Select/cycle region (debounced, single action)
  *  - Fist (hold 800ms) → Reset everything
- *  - Point             → Pause idle rotation
  *  - Two hands apart   → Expand brain regions
  *  - Two hands together→ Collapse brain regions
  *  - Swipe left/right  → Cycle through regions
@@ -21,12 +20,17 @@ export class GestureControls {
     this.gestureStartTime = 0;
     this.gestureDuration = 0;
 
-    // --- Rotation (lightbulb twist + vertical tilt) ---
-    this._smoothTwist = 0;           // smoothed angle delta (Y rotation)
-    this._smoothTiltDY = 0;          // smoothed vertical delta (X rotation)
-    this._twistSensitivity = 2.5;    // twist → Y rotation multiplier
-    this._tiltSensitivity = 3.0;     // hand up/down → X tilt multiplier
-    this._rotationSmoothing = 0.3;   // EMA factor (lower = smoother)
+    // --- Rotation (twist_pose + vertical tilt) ---
+    // No velocity cap — rotation is proportional to hand twist, full 360+.
+    this._rotationVelocityY = 0;
+    this._twistSensitivity = 4.5;
+    this._twistDeadZone = 0.0012;
+    this._twistAccel = 0.45;
+    this._twistDecel = 0.15;
+    this._smoothTiltDY = 0;
+    this._tiltSensitivity = 2.2;
+    this._tiltSmoothing = 0.18;
+    this._maxTiltStep = 0.01;
 
     // --- Pinch debounce ---
     this._pinchTriggered = false;
@@ -75,10 +79,9 @@ export class GestureControls {
       this.onGestureChange(gesture);
     }
 
-    // No hands → drift to idle
+    // No hands → coast to a stop, then drift to idle
     if (gestureData.handsDetected === 0) {
-      this._smoothTwist = 0;
-      this._smoothTiltDY = 0;
+      this._decayRotation();
       this._pinchTriggered = false;
       this._fistTriggered = false;
       if (now - this._lastActiveTime > this._idleTimeout) {
@@ -89,23 +92,21 @@ export class GestureControls {
 
     this._lastActiveTime = now;
 
-    // ========== Dispatch by gesture ==========
-
+    // ========== Discrete gesture actions ==========
     switch (gesture) {
-      case 'open_palm':
-        this._handleRotation(gestureData);
-        break;
-
       case 'pinch':
         this._handlePinch(now);
+        // Allow lightbulb rotation to continue while pinching if twist pose
+        // confidence is active (user often rotates with thumb+index together).
+        if (gestureData.twistPoseActive) {
+          this._handleRotation(gestureData);
+        } else {
+          this._decayRotation();
+        }
         break;
 
       case 'fist':
         this._handleFist(now);
-        break;
-
-      case 'point':
-        this._handlePoint(gestureData);
         break;
 
       case 'spread':
@@ -124,41 +125,73 @@ export class GestureControls {
         this._handleSwipe('right');
         break;
 
+      case 'twist_pose':
+        this._handleRotation(gestureData);
+        break;
+
       default:
+        this._decayRotation();
         break;
     }
   }
 
   /**
-   * Open palm: rotate brain using lightbulb-twist motion.
+   * Rotation from twist_pose.
    *
-   * Y rotation (horizontal spin): driven by hand *twist* — the change in roll
-   * angle of the palm. Twist clockwise → brain rotates right. Like screwing
-   * a lightbulb.
-   *
-   * X rotation (vertical tilt): driven by hand *vertical movement* — move hand
-   * up → brain tilts up, move hand down → brain tilts down.
+   * Y rotation is directly proportional to hand twist — no velocity cap.
+   * Twist more = rotate more, full 360 degrees and beyond.
+   * X tilt remains tied to vertical hand movement with smoothing and clamping.
    */
   _handleRotation(data) {
     this.brain.setIdle(false);
 
-    // --- Y rotation from twist (lightbulb) ---
-    if (Math.abs(data.handAngleDelta) < 0.5) {
-      // Ignore deltas > 0.5 rad (~28°) per frame — likely tracking glitch
-      this._smoothTwist += (data.handAngleDelta - this._smoothTwist) * this._rotationSmoothing;
-      this.brain.group.rotation.y += this._smoothTwist * this._twistSensitivity;
+    // --- Y rotation from twist (lightbulb) — uncapped, proportional ---
+    const twistDelta = data.handAngleDelta || 0;
+    let targetVel = 0;
+    if (Math.abs(twistDelta) > this._twistDeadZone) {
+      targetVel = twistDelta * this._twistSensitivity;
     }
+    // Ramp toward target velocity (no cap — faster twist = faster spin)
+    this._rotationVelocityY += (targetVel - this._rotationVelocityY) * this._twistAccel;
+    this.brain.group.rotation.y += this._rotationVelocityY;
 
     // --- X rotation from vertical hand movement ---
     if (data.palmDelta) {
-      this._smoothTiltDY += (data.palmDelta.dy - this._smoothTiltDY) * this._rotationSmoothing;
-      this.brain.group.rotation.x += this._smoothTiltDY * this._tiltSensitivity;
-      this.brain.group.rotation.x = Math.max(-0.8, Math.min(0.8, this.brain.group.rotation.x));
+      this._smoothTiltDY += (data.palmDelta.dy - this._smoothTiltDY) * this._tiltSmoothing;
+      if (Math.abs(this._smoothTiltDY) > 0.0015) {
+        const tiltStep = Math.max(
+          -this._maxTiltStep,
+          Math.min(this._maxTiltStep, this._smoothTiltDY * this._tiltSensitivity)
+        );
+        this.brain.group.rotation.x += tiltStep;
+        this.brain.group.rotation.x = Math.max(-0.8, Math.min(0.8, this.brain.group.rotation.x));
+      }
     }
 
-    // Clear pinch/fist flags while palm is open
+    // Sync BrainModel targets to current position so its internal lerp
+    // doesn't fight the gesture-driven rotation.
+    this.brain.targetRotationY = this.brain.group.rotation.y;
+    this.brain.targetRotationX = this.brain.group.rotation.x;
+
+    // Clear pinch/fist flags while rotating
     this._pinchTriggered = false;
     this._fistTriggered = false;
+  }
+
+  _decayRotation() {
+    this._rotationVelocityY += (0 - this._rotationVelocityY) * this._twistDecel;
+    this._smoothTiltDY += (0 - this._smoothTiltDY) * this._twistDecel;
+
+    if (Math.abs(this._rotationVelocityY) > 0.00005) {
+      this.brain.group.rotation.y += this._rotationVelocityY;
+    } else {
+      this._rotationVelocityY = 0;
+    }
+
+    // Keep BrainModel targets in sync so its internal lerp doesn't pull
+    // the brain back to some old position after gesture ends.
+    this.brain.targetRotationY = this.brain.group.rotation.y;
+    this.brain.targetRotationX = this.brain.group.rotation.x;
   }
 
   /**
@@ -205,16 +238,6 @@ export class GestureControls {
     if (this.onRegionSelect) this.onRegionSelect(null);
     if (this.onExplosionChange) this.onExplosionChange(0);
     if (this.onGestureChange) this.onGestureChange('none');
-  }
-
-  /**
-   * Point: keep the brain still (stop idle rotation) but don't do random region selection.
-   * The user can see what they're pointing at via the webcam feedback.
-   */
-  _handlePoint(_data) {
-    this.brain.setIdle(false);
-    this._pinchTriggered = false;
-    this._fistTriggered = false;
   }
 
   /**

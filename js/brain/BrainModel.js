@@ -237,13 +237,12 @@ export class BrainModel {
     if (this.isIdle) {
       this.group.rotation.y += this.idleRotationSpeed * dt;
     } else {
-      // Smooth lerp toward target rotation
-      this.group.rotation.y += (this.targetRotationY - this.group.rotation.y) * Math.min(1, 5 * dt);
-      this.group.rotation.x += (this.targetRotationX - this.group.rotation.x) * Math.min(1, 5 * dt);
+      // Gentle lerp — GestureControls already drives rotation directly,
+      // so this just smooths any residual difference without fighting it.
+      const lerpSpeed = Math.min(1, 3 * dt);
+      this.group.rotation.y += (this.targetRotationY - this.group.rotation.y) * lerpSpeed;
+      this.group.rotation.x += (this.targetRotationX - this.group.rotation.x) * lerpSpeed;
     }
-
-    // Clamp X rotation
-    this.group.rotation.x = Math.max(-0.8, Math.min(0.8, this.group.rotation.x));
 
     // Pulse selected region
     if (this.selectedId) {
