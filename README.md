@@ -101,10 +101,83 @@ Click the ✕ button to close the card.
 
 ### Gesture Recognition Pipeline
 
-1. Webcam feed → MediaPipe HandLandmarker → 21 landmarks per hand
-2. Landmarks → GestureRecognizer → Gesture classification (twist_pose, pinch, fist, spread, squeeze, swipe)
-3. Gesture + metadata → GestureControls → Brain model updates
-4. Brain model → Three.js rendering → canvas display
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                           │
+│  WEBCAM INPUT                                                             │
+│  ↓                                                                        │
+│  MediaPipe HandLandmarker                                                 │
+│  (Real-time hand tracking, 21 landmarks per hand)                        │
+│  ↓                                                                        │
+│  GestureRecognizer (js/tracking/GestureRecognizer.js)                    │
+│  • Analyzes landmark positions                                            │
+│  • Calculates hand roll angle (twist), curl ratios, pinch distance       │
+│  • Outputs: gesture name + metadata (handAngleDelta, palmDelta, etc.)    │
+│  ↓                                                                        │
+│  ┌─────────────────────────────────────────────────────────────┐        │
+│  │ GESTURE CLASSIFICATION                                      │        │
+│  ├─────────────────────────────────────────────────────────────┤        │
+│  │ • twist_pose → Hand roll (lightbulb twist)                 │        │
+│  │ • pinch → Thumb + index together                           │        │
+│  │ • fist → All fingers curled                                │        │
+│  │ • spread → Both hands apart (two-hand)                     │        │
+│  │ • squeeze → Both hands together (two-hand)                 │        │
+│  │ • swipe_left/right → Hand swiping motion                   │        │
+│  └─────────────────────────────────────────────────────────────┘        │
+│  ↓                                                                        │
+│  GestureControls (js/controls/GestureControls.js)                        │
+│  • Maps gesture → brain action                                            │
+│  • Updates rotation velocity, tilt, expansion                             │
+│  • Handles debouncing & cooldowns                                         │
+│  ↓                                                                        │
+│  BrainModel (js/brain/BrainModel.js)                                     │
+│  • Applies rotation, expansion, region selection                          │
+│  • Manages idle animation                                                 │
+│  • Triggers visual feedback (highlights, pulse)                           │
+│  ↓                                                                        │
+│  Three.js Rendering                                                      │
+│  • Updates mesh positions, materials, colors                              │
+│  • Renders to WebGL canvas                                                │
+│  ↓                                                                        │
+│  CANVAS OUTPUT                                                            │
+│  (60 FPS interactive 3D brain visualization)                              │
+│                                                                           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Flow Highlights:**
+
+1. **Input capture** — Webcam frames processed by MediaPipe at ~30 FPS
+2. **Gesture recognition** — Raw landmarks → robust gesture classification with outlier filtering
+3. **Action mapping** — Each gesture triggers specific brain model updates
+4. **Smooth animation** — EMA smoothing + velocity ramping prevents jitter
+5. **Real-time rendering** — Three.js renders changes to canvas every frame at 60 FPS
+
+**Data Flow for Twist Rotation (Example):**
+
+```
+Hand twists left/right
+    ↓
+HandLandmarker detects landmark changes
+    ↓
+GestureRecognizer calculates hand roll angle delta (handAngleDelta)
+    ↓
+Outlier rejection + EMA smoothing
+    ↓
+GestureControls reads handAngleDelta
+    ↓
+Multiplies by _twistSensitivity (2.8)
+    ↓
+Ramps velocity toward target with _twistAccel (0.45)
+    ↓
+Applies velocity to BrainModel.group.rotation.y
+    ↓
+BrainModel syncs targetRotationY to prevent fighting
+    ↓
+Three.js renders updated brain position
+    ↓
+Smooth 360° rotation on canvas
+```
 
 ### Rotation Control Details
 
