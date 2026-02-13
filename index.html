@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Interactive 3D Brain</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <!-- Full-bleed 3D canvas -->
+  <div id="canvas-container">
+    <canvas id="brain-canvas"></canvas>
+  </div>
+
+  <!-- Webcam PiP — tiny floating corner -->
+  <div id="webcam-pip">
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="landmark-canvas"></canvas>
+    <div id="webcam-status">Camera Off</div>
+  </div>
+
+  <!-- Floating info card — appears on selection -->
+  <div id="info-card" class="hidden">
+    <button id="info-close" aria-label="Close">&times;</button>
+    <div id="info-color-dot"></div>
+    <h2 id="region-name"></h2>
+    <p id="region-description"></p>
+    <div class="info-divider"></div>
+    <div class="info-section">
+      <h3>Functions</h3>
+      <ul id="region-functions"></ul>
+    </div>
+    <div class="info-section">
+      <h3>Associated Conditions</h3>
+      <ul id="region-conditions"></ul>
+    </div>
+  </div>
+
+  <!-- Gesture pill — tiny floating indicator -->
+  <div id="gesture-pill">
+    <span id="gesture-name">Ready</span>
+  </div>
+
+  <!-- Gesture cheat-sheet — floating bottom right -->
+  <div id="gesture-cheatsheet">
+    <h4>Controls</h4>
+    <div class="cheat-row"><span class="cheat-key">Drag</span><span class="cheat-action">Rotate</span></div>
+    <div class="cheat-row"><span class="cheat-key">Scroll</span><span class="cheat-action">Expand</span></div>
+    <div class="cheat-row"><span class="cheat-key">Click</span><span class="cheat-action">Select</span></div>
+    <div class="cheat-row"><span class="cheat-key">R</span><span class="cheat-action">Reset</span></div>
+    <div class="cheat-row" style="margin-top:6px; border-top: 1px solid rgba(255,255,255,0.04); padding-top:6px;">
+      <span class="cheat-key">Open palm</span><span class="cheat-action">Rotate</span>
+    </div>
+    <div class="cheat-row"><span class="cheat-key">Pinch</span><span class="cheat-action">Select</span></div>
+    <div class="cheat-row"><span class="cheat-key">Fist</span><span class="cheat-action">Reset</span></div>
+    <div class="cheat-row"><span class="cheat-key">Spread</span><span class="cheat-action">Expand</span></div>
+  </div>
+
+  <!-- Hidden status elements (JS reads these) -->
+  <span id="expansion-value" class="sr-only">0%</span>
+  <span id="hands-detected" class="sr-only">0</span>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
