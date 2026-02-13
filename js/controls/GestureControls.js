@@ -2,10 +2,10 @@
  * Maps recognized gestures to BrainModel actions.
  *
  * Intuitive gesture mapping:
- *  - Open palm + move  → Rotate brain (relative delta, like grabbing and turning)
+ *  - Open palm + twist → Rotate brain (lightbulb twist = Y rotation, hand up/down = X tilt)
  *  - Pinch             → Select/cycle region (debounced, single action)
  *  - Fist (hold 800ms) → Reset everything
- *  - Point             → Highlight nearest region via direction (or idle)
+ *  - Point             → Pause idle rotation
  *  - Two hands apart   → Expand brain regions
  *  - Two hands together→ Collapse brain regions
  *  - Swipe left/right  → Cycle through regions
@@ -21,11 +21,12 @@ export class GestureControls {
     this.gestureStartTime = 0;
     this.gestureDuration = 0;
 
-    // --- Rotation (relative delta) ---
-    this._smoothDX = 0;
-    this._smoothDY = 0;
-    this._rotationSensitivity = 4.0; // multiplier for hand delta → rotation
-    this._rotationSmoothing = 0.25;  // EMA factor (lower = smoother, 0.15-0.35 feels good)
+    // --- Rotation (lightbulb twist + vertical tilt) ---
+    this._smoothTwist = 0;           // smoothed angle delta (Y rotation)
+    this._smoothTiltDY = 0;          // smoothed vertical delta (X rotation)
+    this._twistSensitivity = 2.5;    // twist → Y rotation multiplier
+    this._tiltSensitivity = 3.0;     // hand up/down → X tilt multiplier
+    this._rotationSmoothing = 0.3;   // EMA factor (lower = smoother)
 
     // --- Pinch debounce ---
     this._pinchTriggered = false;
@@ -76,8 +77,8 @@ export class GestureControls {
 
     // No hands → drift to idle
     if (gestureData.handsDetected === 0) {
-      this._smoothDX = 0;
-      this._smoothDY = 0;
+      this._smoothTwist = 0;
+      this._smoothTiltDY = 0;
       this._pinchTriggered = false;
       this._fistTriggered = false;
       if (now - this._lastActiveTime > this._idleTimeout) {
@@ -129,23 +130,29 @@ export class GestureControls {
   }
 
   /**
-   * Open palm: rotate brain using hand *movement delta*, not absolute position.
-   * Feels like physically grabbing and turning the brain.
+   * Open palm: rotate brain using lightbulb-twist motion.
+   *
+   * Y rotation (horizontal spin): driven by hand *twist* — the change in roll
+   * angle of the palm. Twist clockwise → brain rotates right. Like screwing
+   * a lightbulb.
+   *
+   * X rotation (vertical tilt): driven by hand *vertical movement* — move hand
+   * up → brain tilts up, move hand down → brain tilts down.
    */
   _handleRotation(data) {
     this.brain.setIdle(false);
 
+    // --- Y rotation from twist (lightbulb) ---
+    if (Math.abs(data.handAngleDelta) < 0.5) {
+      // Ignore deltas > 0.5 rad (~28°) per frame — likely tracking glitch
+      this._smoothTwist += (data.handAngleDelta - this._smoothTwist) * this._rotationSmoothing;
+      this.brain.group.rotation.y += this._smoothTwist * this._twistSensitivity;
+    }
+
+    // --- X rotation from vertical hand movement ---
     if (data.palmDelta) {
-      // Smooth the delta with EMA
-      this._smoothDX += (data.palmDelta.dx - this._smoothDX) * this._rotationSmoothing;
-      this._smoothDY += (data.palmDelta.dy - this._smoothDY) * this._rotationSmoothing;
-
-      // Apply as rotation — negative X because webcam is mirrored
-      const rotDeltaY = -this._smoothDX * this._rotationSensitivity;
-      const rotDeltaX = this._smoothDY * this._rotationSensitivity;
-
-      this.brain.group.rotation.y += rotDeltaY;
-      this.brain.group.rotation.x += rotDeltaX;
+      this._smoothTiltDY += (data.palmDelta.dy - this._smoothTiltDY) * this._rotationSmoothing;
+      this.brain.group.rotation.x += this._smoothTiltDY * this._tiltSensitivity;
       this.brain.group.rotation.x = Math.max(-0.8, Math.min(0.8, this.brain.group.rotation.x));
     }
 

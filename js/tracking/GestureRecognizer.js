@@ -102,6 +102,9 @@ export class GestureRecognizer {
     // Two-hand smoothing
     this._smoothTwoHandDist = null;
     this._twoHandSmoothing = 0.3; // EMA factor (0=no smoothing, 1=no memory)
+
+    // Hand roll angle tracking (for lightbulb-twist rotation)
+    this._prevHandAngle = null;
   }
 
   /**
@@ -114,6 +117,8 @@ export class GestureRecognizer {
       confidence: 0,
       handPosition: null,
       palmDelta: null,       // { dx, dy } frame-to-frame movement
+      handAngle: 0,          // hand roll angle in radians (index→pinky line)
+      handAngleDelta: 0,     // frame-to-frame twist amount (lightbulb rotation)
       handsDetected: 0,
       twoHandDistance: null,
       twoHandDelta: 0,
@@ -124,6 +129,7 @@ export class GestureRecognizer {
       this._palmHistory = [];
       this._smoothTwoHandDist = null;
       this._gestureBuffer = [];
+      this._prevHandAngle = null;
       return output;
     }
 
@@ -151,6 +157,24 @@ export class GestureRecognizer {
     this._palmHistory.push({ x: palmX, y: palmY, time: now });
     // Keep only last 20 entries
     if (this._palmHistory.length > 20) this._palmHistory.shift();
+
+    // ========= Hand roll angle (lightbulb twist) =========
+    // The angle of the line from INDEX_MCP → PINKY_MCP measures wrist roll.
+    // Twisting your hand like screwing a lightbulb changes this angle.
+    const handAngle = Math.atan2(
+      lm[PINKY_MCP].y - lm[INDEX_MCP].y,
+      lm[PINKY_MCP].x - lm[INDEX_MCP].x
+    );
+    output.handAngle = handAngle;
+
+    if (this._prevHandAngle !== null) {
+      let angleDelta = handAngle - this._prevHandAngle;
+      // Handle ±PI wraparound (e.g. going from 3.1 to -3.1 is a tiny change, not 6.2)
+      if (angleDelta > Math.PI) angleDelta -= 2 * Math.PI;
+      if (angleDelta < -Math.PI) angleDelta += 2 * Math.PI;
+      output.handAngleDelta = angleDelta;
+    }
+    this._prevHandAngle = handAngle;
 
     // Finger curl states (0 = extended, 1 = curled)
     const indexCurl = getFingerCurl(lm, INDEX_PIP, INDEX_TIP);
